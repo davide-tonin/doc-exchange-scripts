@@ -1,0 +1,160 @@
+spring:
+    application:
+        name: doc-exchange
+    jackson:
+        deserialization:
+            fail-on-numbers-for-enums: true
+    sql:
+        init:
+            mode: never
+    task:
+        scheduling:
+            pool:
+                size: 4
+
+server:
+    port: 8080
+    servlet:
+        context-path: /api
+
+logging:
+    level:
+        root: INFO
+        org.springframework.jdbc.core: INFO
+        org.springframework.jdbc.core.StatementCreatorUtils: INFO
+
+app:
+    deployment:
+        stage: QA
+        aws-account-id: '410368684253'
+    bootstrap:
+        keys-ciphertext-base64url: 'AQICAHiTUxbBQ9RD4Ob2vXLRwq49lqZumLq-hyXMr12Eugi5WwEmw1Safqhz1KX7qN2L8ip4AAADhDCCA4AGCSqGSIb3DQEHBqCCA3EwggNtAgEAMIIDZgYJKoZIhvcNAQcBMB4GCWCGSAFlAwQBLjARBAw6zzmlsWoytWlPMygCARCAggM3UZVcw0oLkuPRnHbGF_OTRJFdnhPtcL-9wqJqFZ9bQRaTDsdgvZ0ES6Y_tcmMsR4y_2roxgvyeOY2_KJm4jH3P7UO78VDYUzlLvnAj8_wvruXviIoIl38rRaqWkC0mO1jszP3WxKpnWWZmz209DRHSVZLixspa6FJGTmCuVYU1HTrmkAG6eiCWwnXu0o36l-k9sNPnNP6pWJx2MMyr-5IzMy6dJQsJWi2Pio6fmWmoQDjSlJ6N8tyYmJqhbHhO77vUufBd3yY1pCdwI0weCKd4xucAJ3n4LiHZd7yc6QfCorCAEJ3UaFxED5u-p5DDuSN_7zIl4Tm7TWT43WXRnDEXBfz-W4ZIp8I1TI_VZGCO_2lnlTzxqmRx6zVZxnHH-9JluM8XxB8pp6ZwsY3CcHeyCrlfg8kZF8cE8m4DWvJM_udlwfeArmLzXHEmKaLhf5_TMFHI8MrC1TAWObH1eoDo4IBRW19NiqCiPo3D6kCMpViYA8qv6ruwtFjJZHRIU3clxKtxy-E0-oyvQskrx9k5hP28VcYy9ObvvoJXD-ACEgDB1UHUCKZVNaU0oHjvwbrhJz6VhZHtVzZzwO-JQE8p3JAO_Y-cXnctx8Ewgke3KCgviGziY6hMdj496PXPXH-Qa5I3EmOPMVfGaTmc1Fw3lgmKXYamskYf-hZF1sqVxP6AbktWhy_X01h82_KaELHLK0HvO5sHGd1Cp7sxL8cleLYqfC7nrtzJrnDy0JZ_d4leSpCBvJeFgige45G_HVOGhLsdj8PW5S80zCT3p4vOTwnJdtjgAWgcAr7M5b5HzSzFoDhrTI3o4ETBnRxW9_kmF7aXsM0MZoxi_YqveEIjfz5FScwRaLO6ww_xmDbeCfsTSyVHXRuROYZjah1UFGkVIzFncYdssJbXQxJIC9BHycn63Vw_eYPBEziQYdyCRf9z3CvS3Gjh3EVfxtYD_qIUrt1jSAdLaJFFtMBLVKv-C0f-sB2v_xPXIDgpHimZBE_lJE51xEibCtWcsp7HBDPFDne4L2kmTpUofJ1Y6hlGq8NTdFaIr0YGn1S-aYlKB4xg3VxMCKEMEqRPZo88X8Bq3-Wg__bQA'
+    aws:
+        config-region: eu-south-1
+        data-region: eu-south-1
+    database:
+        primary:
+            connection-mode: JDBC
+            url: jdbc:postgresql://localhost:5433/de-db
+            username: deapis_user
+            password: 'ETZ4cyv5ykj@gnm*cyf'
+            pool:
+                name: QaHikari
+                minimum-idle: 2
+                maximum-size: 10
+                idle-timeout: PT30S
+                maximum-lifetime: PT10M
+                connection-timeout: PT3S
+                auto-commit: false
+        worker:
+            connection-mode: JDBC
+            url: jdbc:postgresql://localhost:5433/de-db
+            username: backfill_worker_user
+            password: 'ary0yfd!bmp.wbx4EUP'
+    web:
+        problem-root: 'https://schemalane.com/problems'
+        public-api-base-url: 'http://localhost:5173/api'
+        password-reset-ui-base-url: 'http://localhost:5173/reset-password'
+    auth:
+        access-token-ttl: PT15M
+        refresh-token-ttl: P7D
+        session-max-age: P30D
+    secrets:
+        refresh-enabled: true
+        refresh-interval: PT5M
+        object-key: 'secrets.json'
+    email:
+        region: eu-south-1
+        credential-reset-sender: 'qa-noreply@schemalane.com'
+    resources:
+        secrets-bucket-preset: secrets_bucket
+        receipts-bucket-preset: receipt_bucket
+        documents-bucket-preset: documents_bucket
+    receipts:
+        enabled: true
+        spool-directory: './build/qa-receipts'
+        max-records-per-file: 1000
+        max-open-duration: PT30S
+        queue-capacity: 10000
+        upload-enabled: true
+        upload-interval: PT1M
+        prefix: 'receipts'
+    documents:
+        prefix: 'documents'
+        max-canonical-bytes: 10485760
+        max-framed-bytes: 10485760
+        db-storage-threshold-bytes: 0
+        shape-cache-ttl: PT30S
+        alias-cache-ttl: PT5M
+    body-fetch:
+        permits:
+            cache: 10
+            database: 4
+            s3: 10
+        total-timeout: PT1S
+        concurrency:
+            disk: 10
+            s3: 10
+        cache:
+            directory: './build/body-cache'
+            encrypted-volume-expected: true
+            maximum-bytes: 1073741824
+            idle-ttl: PT1H
+            high-watermark-percent: 90
+            low-watermark-percent: 75
+            cleanup-interval: PT1M
+    backfill:
+        system-identity-version-id: 1
+        reconciliation:
+            batch-limit: 200
+        worker:
+            enabled: true
+            id: claim-backfill-worker
+            lease-timeout: PT5M
+            retry-ceiling: 5
+            batch-size: 100
+        schedule:
+            enabled: true
+            worker-interval: PT60S
+            reconciliation-interval: PT5M
+            max-jobs-per-run: 10
+    rate-limiter:
+        enabled: true
+        pre-auth:
+            enabled: true
+            limits:
+                - { capacity: 50, window: PT5S }
+                - { capacity: 150, window: PT30S }
+        post-auth:
+            enabled: true
+            credential:
+                CORE: { limits: [{ capacity: 300, window: PT10S }, { capacity: 3000, window: PT1M }] }
+                ADMIN: { limits: [{ capacity: 30, window: PT10S }, { capacity: 300, window: PT1M }] }
+            tenant:
+                CORE: { limits: [{ capacity: 1000, window: PT10S }, { capacity: 10000, window: PT1M }] }
+                ADMIN: { limits: [{ capacity: 100, window: PT10S }, { capacity: 1000, window: PT1M }] }
+        cache:
+            maximum-size: 100000
+            expire-after-access: PT10M
+
+springdoc:
+    api-docs:
+        path: /v3/api-docs
+        enabled: true
+    swagger-ui:
+        path: /swagger-ui.html
+        operations-sorter: alpha
+        tags-sorter: alpha
+        display-request-duration: true
+        doc-expansion: none
+    show-actuator: false
+    packages-to-scan: eu.davide.features
+
+management:
+    endpoints:
+        web:
+            exposure:
+                include: mappings,health,info
+    endpoint:
+        health:
+            show-details: always
