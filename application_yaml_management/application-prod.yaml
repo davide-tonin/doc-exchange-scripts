@@ -66,6 +66,9 @@ app:
     email:
         region: eu-south-1
         credential-reset-sender: 'qa-noreply@schemalane.com'
+    tenant-init:
+        # Never enable outside the local loopback QA process.
+        seed-echo: false
     resources:
         secrets-bucket-preset: secrets_bucket
         receipts-bucket-preset: receipt_bucket

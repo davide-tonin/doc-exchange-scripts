@@ -29,6 +29,20 @@ tests validate those files; all commands which operate them are here.
 
 `qa-db-reset.ps1` refuses to clean a target other than the exact local QA URL.
 
+`seed-ui.ps1` performs that clean reset and then fills the database with the full UI dataset
+through the real public API: ten interlinked tenants with aliases, roles, POVs, shapes,
+identities, grants, groups, cross-tenant shares and party groups, plus ~690 backdated documents
+and mixed read cursors. Sized against the service's own caps and page sizes, so pagination, limit
+alerts, lifecycle badges and cross-tenant screens all have data behind them. No email is involved:
+the local QA document enables the guarded seed-echo delivery seam, while bootstrap still follows
+the production path.
+
+Every login shares one password, `UiPlayground!2026` (`-LoginPassword` to change it), and the run
+writes `build\seed\seed-manifest.json` in the service repo with every id, login and achieved
+count. `-Scale Fast` gives the same shape with a sixth of the rows; `-Seed` makes a run
+reproducible. Implementation lives in `database\seed\`; the dataset rationale is in the service
+repo at `docs\UI_SEED_DATASET.md`.
+
 ## Postman E2E and UI development
 
 ```powershell

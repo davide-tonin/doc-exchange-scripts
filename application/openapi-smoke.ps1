@@ -7,16 +7,16 @@
 # is committed: build/ is gitignored.
 #
 # Prerequisites:
-#   1. The app is running and reachable at -BaseUrl (start it with scripts\run-app.ps1).
+#   1. The app is running and reachable at -BaseUrl (start it with .\run-app.ps1).
 #   2. Node/npx on PATH (the OpenAPI Generator CLI is fetched via npx; no global install needed).
 #
 # The generator + CLI-wrapper versions are PINNED below so the smoke is reproducible. Record the
 # printed versions in the ledger evidence for OAS-004.
 #
 # Usage:
-#   scripts\openapi-smoke.ps1
-#   scripts\openapi-smoke.ps1 -BasicUser user -BasicPassword $env:OPENAPI_SMOKE_PASSWORD
-#   scripts\openapi-smoke.ps1 -BaseUrl http://localhost:8080/api -GeneratorVersion 7.13.0
+#   .\openapi-smoke.ps1
+#   .\openapi-smoke.ps1 -BasicUser user -BasicPassword $env:OPENAPI_SMOKE_PASSWORD
+#   .\openapi-smoke.ps1 -BaseUrl http://localhost:8080/api -GeneratorVersion 7.13.0
 
 param(
     [string] $ServiceRepository = "C:\\Users\\DavideTonin\\IdeaProjects\\doc-exchange-service",

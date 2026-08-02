@@ -13,6 +13,7 @@ spring:
                 size: 4
 
 server:
+    address: 127.0.0.1
     port: 8080
     servlet:
         context-path: /api
@@ -66,6 +67,10 @@ app:
     email:
         region: eu-south-1
         credential-reset-sender: 'qa-noreply@schemalane.com'
+    tenant-init:
+        # This repository's QA document is local-only: server, API and database are loopback.
+        # It enables the UI volume seed to receive the real bootstrap token without SES.
+        seed-echo: true
     resources:
         secrets-bucket-preset: secrets_bucket
         receipts-bucket-preset: receipt_bucket

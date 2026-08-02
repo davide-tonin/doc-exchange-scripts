@@ -3,7 +3,9 @@ param(
     [string] $DatabaseRepository = "C:\Users\DavideTonin\DataGripProjects\doc-exchange-db",
     [string] $Environment = "postman\environments\local-qa.postman_environment.json",
     [int] $HealthTimeoutSeconds = 90,
-    [int] $RequestDelayMs = 350
+    [int] $RequestDelayMs = 350,
+    [ValidateSet("Full", "Provision")]
+    [string] $Mode = "Full"
 )
 
 $ErrorActionPreference = "Stop"
@@ -117,11 +119,15 @@ Write-Host "Fresh QA application is UP with database health UP." -ForegroundColo
 Write-Phase 5 "Refreshing generated collections from live public/internal OpenAPI."
 & "$PSScriptRoot\refresh.ps1" -ServiceRepository $serviceRepositoryPath -BaseUrl $baseUrl
 
-Write-Phase 6 "Running provisioning, Smoke, and interactive password-reset E2E."
-& "$PSScriptRoot\run.ps1" -ServiceRepository $serviceRepositoryPath -Mode Full -Environment $Environment
+if ($Mode -eq "Full") {
+    Write-Phase 6 "Running provisioning, Smoke, and interactive password-reset E2E."
+} else {
+    Write-Phase 6 "Provisioning the fixture tenants through tenant init, bootstrap, and Basic login."
+}
+& "$PSScriptRoot\run.ps1" -ServiceRepository $serviceRepositoryPath -Mode $Mode -Environment $Environment
 
 $elapsed = $totalStopwatch.Elapsed
 Write-Host ""
 Write-Host (
-    "Clean-room Postman E2E completed in {0:mm\:ss}." -f $elapsed
+    "Clean-room Postman $Mode workflow completed in {0:mm\:ss}." -f $elapsed
 ) -ForegroundColor Green
