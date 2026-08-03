@@ -347,7 +347,10 @@ function Add-SeedShapes
         if (-not $result.Ok) { [void] $Tenant.CapHits.Add("shape=$($result.Status)"); break }
 
         $shape = [pscustomobject]@{
-            Id             = $result.Json.id
+            # Shape item endpoints take the ROW/version id. `id` is the stable lineage id and
+            # deliberately fails the ROW checksum used by @ValidObfuscatedId.
+            Id             = $result.Json.version_id
+            StableId       = $result.Json.id
             Name           = $name
             NormalizedName = $result.Json.normalized_name
             Version        = $result.Json.version
@@ -363,11 +366,10 @@ function Add-SeedShapes
             for ($r = 0; $r -lt $revisions; $r++)
             {
                 $revised = Invoke-SeedTenantApi -Tenant $Tenant -Context "shape revise" -Method PUT `
-                    -Route ("/shapes/{0}" -f $shape.Id) -Body $body `
-                    -Header @{ "If-Match" = $shape.ETag } -AllowStatus @(409, 412, 428)
+                    -Route ("/shapes/{0}" -f $shape.Id) -Body $body -AllowStatus @(409)
                 if (-not $revised.Ok) { break }
+                $shape.Id = $revised.Json.version_id
                 $shape.Version = $revised.Json.version
-                $shape.ETag = $revised.ETag
             }
         }
     }
@@ -478,7 +480,9 @@ function Add-SeedLocalGrants
 {
     param($Tenant, $Random)
 
-    $roles = @($Tenant.Roles)
+    # Disabled roles remain in the dataset for lifecycle/empty-state UI, but the real grant
+    # validator deliberately does not resolve them as assignable permissions.
+    $roles = @($Tenant.Roles | Where-Object { $_.Status -eq "ENABLED" })
     $povs = @($Tenant.Povs)
     if ($roles.Count -eq 0 -and $povs.Count -eq 0) { return }
 
@@ -522,7 +526,7 @@ function Add-SeedGroups
     $pools = @{
         ALIAS    = @($Tenant.Aliases | ForEach-Object { $_.Id })
         IDENTITY = @($Tenant.Identities | ForEach-Object { $_.Id })
-        ROLE     = @($Tenant.Roles | ForEach-Object { $_.Id })
+        ROLE     = @($Tenant.Roles | Where-Object { $_.Status -eq "ENABLED" } | ForEach-Object { $_.Id })
         TENANT   = @($tenantPool.ToArray())
     }
 
@@ -537,17 +541,33 @@ function Add-SeedGroups
         $size = [Math]::Min($pool.Count, $Random.Next(1, [Math]::Min(12, $pool.Count + 1)))
         $members = @($pool | Get-Random -Count $size -SetSeed $Random.Next())
 
-        $body = @{
-            entity_type = $template.Entity
-            name        = $name
-            description = $template.Description
-            ids         = $members
+        $route = "/groups/"
+        $storedEntity = $template.Entity
+        if ($template.Entity -eq "TENANT")
+        {
+            # TENANT has no stable-id representation on any public response. Homogeneous groups
+            # require stable-flagged member ids, so a client cannot lawfully construct one from
+            # bootstrap/auth/directory data. PARTY is the public, round-trippable tenant grouping
+            # surface and accepts the canonical row tenant ids returned by bootstrap.
+            $partyMembers = @($members | ForEach-Object { @{ type = "TENANT"; value = $_ } })
+            $body = @{ name = $name; description = $template.Description; members = $partyMembers }
+            $route = "/groups/party"
+            $storedEntity = "PARTY"
+        }
+        else
+        {
+            $body = @{
+                entity_type = $template.Entity
+                name        = $name
+                description = $template.Description
+                ids         = $members
+            }
         }
         $result = Invoke-SeedTenantApi -Tenant $Tenant -Context "group" -Method POST `
-            -Route "/groups/" -Body $body -AllowStatus @(409, 422)
+            -Route $route -Body $body -AllowStatus @(409, 422)
         if (-not $result.Ok) { [void] $Tenant.CapHits.Add("group=$($result.Status)"); break }
         [void] $Tenant.Groups.Add([pscustomobject]@{
-            Id = $result.Json.id; Name = $name; Entity = $template.Entity
+            Id = $result.Json.id; Name = $name; Entity = $storedEntity
         })
     }
 }
@@ -632,14 +652,22 @@ function Invoke-SeedPhaseAliasPromotion
             {
                 $stepReject = "NULL"
                 if ($step -eq "RJ") { $stepReject = $reject }
+                $canonicalAlias = $tenant.CanonicalAlias.ToString().Replace("'", "''")
                 $sql = @"
+SELECT set_config(
+    'app.tenant_context',
+    (SELECT tenant_id::TEXT
+       FROM de_schema.fn_alias_registry_resolve(
+           ARRAY['CA'::CHAR(2)], ARRAY['$canonicalAlias'])
+      LIMIT 1),
+    FALSE);
 SELECT 1 FROM de_schema.fn_alias_transition(
-    (SELECT id FROM de_schema.tenant WHERE display_name_cache = '$($tenant.DisplayName.Replace("'", "''"))' LIMIT 1),
+    CURRENT_SETTING('app.tenant_context')::INT,
     '$typeCode', '$normalized', '$step',
     (SELECT version_id FROM de_schema.identity
-      WHERE tenant_id = (SELECT id FROM de_schema.tenant WHERE display_name_cache = '$($tenant.DisplayName.Replace("'", "''"))' LIMIT 1)
+      WHERE tenant_id = CURRENT_SETTING('app.tenant_context')::INT
       ORDER BY version_id LIMIT 1),
-    NULL, NULL, NULL, 'MA', NULL, $stepReject, NULL);
+    NULL, NULL, NULL, 'OT', NULL, $stepReject, NULL);
 "@
                 Invoke-SeedSql -Sql $sql -Quiet | Out-Null
             }
@@ -893,105 +921,180 @@ function New-SeedDocumentPayload
     }
 }
 
-function Invoke-SeedPhaseDocuments
+function Invoke-SeedDocumentChunk
 {
     param(
+        [Parameter(Mandatory = $true)] $Tenant,
         [Parameter(Mandatory = $true)] $Tenants,
         [Parameter(Mandatory = $true)] $Dataset,
-        [Parameter(Mandatory = $true)] [int] $Seed
+        [Parameter(Mandatory = $true)] [int] $Seed,
+        [Parameter(Mandatory = $true)] [int] $StartOrdinal,
+        [Parameter(Mandatory = $true)] [int] $Count
     )
 
-    Write-SeedPhase "Phase 6/8 - sending documents"
-    $random = New-SeedRandom ($Seed + 4231)
-    $guarantees = @("BEST_EFFORT", "ALL_SENT", "ALL_DELIVERED")
+    Add-Type -AssemblyName System.Net.Http
+    $random = New-SeedRandom ($Seed + 4231 + $Tenant.Key.GetHashCode() + ($StartOrdinal * 7919))
     $subjects = @(
         "Fattura mese corrente", "Ordine urgente", "Spedizione confermata",
         "Documenti doganali allegati", "Sollecito pagamento", "Conferma consegna",
         "Rilascio lotto", "Comunicazione di servizio", $null
     )
-    $sentTotal = 0
+    $recipientPool = New-Object System.Collections.ArrayList
+    $weights = $Dataset.TrafficWeights[$Tenant.Key]
+    foreach ($otherKey in $weights.Keys)
+    {
+        if (-not $Tenants.Contains($otherKey)) { continue }
+        $other = $Tenants[$otherKey]
+        # Canonical aliases are immediately registry-backed by bootstrap. Newly promoted
+        # verifiable aliases can still be waiting on claim-backfill; using them in the volume
+        # loop makes a fixture send depend on an asynchronous worker and can strand the request.
+        # Published aliases remain exercised by party groups and alias screens.
+        $addresses = @($other.CanonicalAlias)
+        for ($w = 0; $w -lt $weights[$otherKey]; $w++)
+        {
+            [void] $recipientPool.Add($addresses[$random.Next(0, $addresses.Count)])
+        }
+    }
+    if ($recipientPool.Count -eq 0) { return [pscustomobject]@{ Key = $Tenant.Key; Sent = 0; Requests = 0; Retries = 0; RateLimited = 0; Failures = 0 } }
+    $uniqueRecipientCount = @($recipientPool | Select-Object -Unique).Count
 
+    $handler = New-Object System.Net.Http.HttpClientHandler
+    $handler.UseProxy = $false
+    $client = New-Object System.Net.Http.HttpClient -ArgumentList $handler
+    $client.Timeout = [System.Threading.Timeout]::InfiniteTimeSpan
+    $sent = 0
+    try
+    {
+        for ($i = 0; $i -lt $Count; $i++)
+        {
+            $ordinal = $StartOrdinal + $i + 1
+            $shape = $Tenant.Shapes[$random.Next(0, $Tenant.Shapes.Count)]
+            $shapeRef = "{0}:{1}" -f $shape.NormalizedName, $shape.Version
+
+        $recipientCount = 1
+        $roll = $random.Next(0, 100)
+        if ($roll -gt 92) { $recipientCount = $random.Next(4, 9) }
+        elseif ($roll -gt 70) { $recipientCount = $random.Next(2, 4) }
+        $recipientCount = [Math]::Min($recipientCount, $uniqueRecipientCount)
+
+        $recipients = New-Object System.Collections.ArrayList
+        while ($recipients.Count -lt $recipientCount)
+        {
+            $candidate = $recipientPool[$random.Next(0, $recipientPool.Count)]
+            if (-not $recipients.Contains($candidate)) { [void] $recipients.Add($candidate) }
+            if ($recipients.Count -ge $uniqueRecipientCount) { break }
+        }
+
+        $cc = New-Object System.Collections.ArrayList
+        if ($random.Next(0, 100) -gt 72)
+        {
+            $ccCount = [Math]::Min(
+                $random.Next(1, 4),
+                [Math]::Max(0, $uniqueRecipientCount - $recipients.Count))
+            while ($cc.Count -lt $ccCount)
+            {
+                $candidate = $recipientPool[$random.Next(0, $recipientPool.Count)]
+                if (-not $recipients.Contains($candidate) -and -not $cc.Contains($candidate))
+                {
+                    [void] $cc.Add($candidate)
+                }
+                if (($cc.Count + $recipients.Count) -ge $uniqueRecipientCount) { break }
+            }
+        }
+
+        $body = @{
+            recipients         = $recipients.ToArray()
+            cc                 = $cc.ToArray()
+            shape              = $shapeRef
+            data               = (New-SeedDocumentPayload -TemplateName $shape.TemplateName -Random $random -Ordinal $ordinal)
+            # Volume fixtures must persist. Strict guarantees intentionally reject unresolved
+            # party lines and create no UI-visible row; those failure contracts belong in API
+            # tests, while BEST_EFFORT preserves the resolved/unresolved line detail on a document.
+            delivery_guarantee = "BEST_EFFORT"
+        }
+        $subject = $subjects[$random.Next(0, $subjects.Count)]
+        if ($subject) { $body["subject"] = $subject }
+
+            $md5 = [Security.Cryptography.MD5]::Create()
+            try
+            {
+                $keyBytes = $md5.ComputeHash([Text.Encoding]::UTF8.GetBytes(
+                    ("ui-seed|{0}|{1}|{2}" -f $Seed, $Tenant.Key, $ordinal)))
+                $idempotencyKey = (New-Object Guid -ArgumentList (, $keyBytes)).ToString()
+            }
+            finally { $md5.Dispose() }
+            $result = Invoke-SeedDocumentHttp -Client $client -Tenant $Tenant -Body $body `
+                -IdempotencyKey $idempotencyKey
+            if ($result.Ok) { $sent++ }
+        }
+    }
+    finally
+    {
+        $client.Dispose()
+        $handler.Dispose()
+    }
+
+    return [pscustomobject]@{
+        Key = $Tenant.Key; Sent = $sent
+        Requests = $script:SeedStats.Requests; Retries = $script:SeedStats.Retries
+        RateLimited = $script:SeedStats.RateLimited; Failures = $script:SeedStats.Failures
+    }
+}
+
+function Invoke-SeedPhaseDocuments
+{
+    param(
+        [Parameter(Mandatory = $true)] $Tenants,
+        [Parameter(Mandatory = $true)] $Dataset,
+        [Parameter(Mandatory = $true)] [int] $Seed,
+        [Parameter(Mandatory = $true)] [string] $Password
+    )
+
+    Write-SeedPhase "Phase 6/8 - sending documents (persistent HTTP client)"
+    $chunkSize = 15
+    $specs = New-Object System.Collections.ArrayList
+    $sentByTenant = [ordered]@{}
     foreach ($key in $Tenants.Keys)
     {
         $tenant = $Tenants[$key]
         $target = $tenant.Definition.Sends
+        $sentByTenant[$key] = 0
         if ($target -le 0) { continue }
         if ($tenant.Shapes.Count -eq 0)
         {
             Write-SeedWarn "$key has no shape of its own; skipping its sends"
             continue
         }
-
-        $weights = $Dataset.TrafficWeights[$key]
-        $recipientPool = New-Object System.Collections.ArrayList
-        foreach ($otherKey in $weights.Keys)
+        for ($start = 0; $start -lt $target; $start += $chunkSize)
         {
-            if (-not $Tenants.Contains($otherKey)) { continue }
-            $other = $Tenants[$otherKey]
-            $addresses = @($other.PublishedAddresses)
-            if ($addresses.Count -eq 0) { $addresses = @($other.CanonicalAlias) }
-            for ($w = 0; $w -lt $weights[$otherKey]; $w++)
-            {
-                [void] $recipientPool.Add($addresses[$random.Next(0, $addresses.Count)])
-            }
+            [void] $specs.Add([pscustomobject]@{
+                Tenant = $tenant; Start = $start; Count = [Math]::Min($chunkSize, $target - $start)
+            })
         }
-        if ($recipientPool.Count -eq 0) { continue }
+    }
 
-        $sent = 0
-        for ($i = 0; $i -lt $target; $i++)
+    $activeTenantKey = $null
+    foreach ($spec in $specs)
+    {
+        if ($activeTenantKey -ne $spec.Tenant.Key)
         {
-            $shape = $tenant.Shapes[$random.Next(0, $tenant.Shapes.Count)]
-            $shapeRef = "{0}:{1}" -f $shape.NormalizedName, $shape.Version
-
-            $recipientCount = 1
-            $roll = $random.Next(0, 100)
-            if ($roll -gt 92) { $recipientCount = $random.Next(4, 9) }
-            elseif ($roll -gt 70) { $recipientCount = $random.Next(2, 4) }
-
-            $recipients = New-Object System.Collections.ArrayList
-            while ($recipients.Count -lt $recipientCount)
-            {
-                $candidate = $recipientPool[$random.Next(0, $recipientPool.Count)]
-                if (-not $recipients.Contains($candidate)) { [void] $recipients.Add($candidate) }
-                if ($recipients.Count -ge $recipientPool.Count) { break }
-            }
-
-            $cc = New-Object System.Collections.ArrayList
-            if ($random.Next(0, 100) -gt 72)
-            {
-                $ccCount = $random.Next(1, 4)
-                while ($cc.Count -lt $ccCount)
-                {
-                    $candidate = $recipientPool[$random.Next(0, $recipientPool.Count)]
-                    if (-not $recipients.Contains($candidate) -and -not $cc.Contains($candidate))
-                    {
-                        [void] $cc.Add($candidate)
-                    }
-                    if (($cc.Count + $recipients.Count) -ge $recipientPool.Count) { break }
-                }
-            }
-
-            $body = @{
-                recipients         = $recipients.ToArray()
-                cc                 = $cc.ToArray()
-                shape              = $shapeRef
-                data               = (New-SeedDocumentPayload -TemplateName $shape.TemplateName -Random $random -Ordinal ($i + 1))
-                delivery_guarantee = $guarantees[$random.Next(0, $guarantees.Count)]
-            }
-            $subject = $subjects[$random.Next(0, $subjects.Count)]
-            if ($subject) { $body["subject"] = $subject }
-
-            $result = Invoke-SeedTenantApi -Tenant $tenant -Context "document send" -Method POST `
-                -Route "/documents/" -Body $body `
-                -Header @{ "Idempotency-Key" = [Guid]::NewGuid().ToString() } `
-                -AllowStatus @(400, 403, 409, 422)
-            if ($result.Ok) { $sent++ }
+            $spec.Tenant.AccessToken = Get-SeedAccessToken -Email $spec.Tenant.Email -Password $Password
+            $activeTenantKey = $spec.Tenant.Key
         }
+        $result = Invoke-SeedDocumentChunk -Tenant $spec.Tenant -Tenants $Tenants -Dataset $Dataset `
+            -Seed $Seed -StartOrdinal $spec.Start -Count $spec.Count
+        $sentByTenant[$result.Key] += $result.Sent
+    }
 
+    $sentTotal = 0
+    foreach ($key in $Tenants.Keys)
+    {
+        $target = $Tenants[$key].Definition.Sends
+        if ($target -le 0) { continue }
+        $sent = $sentByTenant[$key]
         $sentTotal += $sent
         Write-SeedStep ("{0,-10} sent {1}/{2}" -f $key, $sent, $target)
     }
-
     Write-SeedStep "total documents sent: $sentTotal"
     return $sentTotal
 }
@@ -1019,7 +1122,13 @@ function Invoke-SeedPhaseBackdate
 
     Write-SeedPhase "Phase 7/8 - backdating documents across the last $Days days"
 
+    # These are local fixture-maintenance updates, not product writes. The migration owner is
+    # normally subject to FORCE RLS; relax FORCE only inside one transaction, restore it before
+    # commit, and let any error roll the entire operation (including the ALTERs) back.
     $sql = @"
+BEGIN;
+ALTER TABLE de_schema.document NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE de_schema.trace NO FORCE ROW LEVEL SECURITY;
 WITH ordered AS (
     SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn, COUNT(*) OVER () AS total
     FROM de_schema.document
@@ -1030,17 +1139,16 @@ SET created_at = NOW()
     + ((o.rn::FLOAT8 / GREATEST(o.total, 1)::FLOAT8) * INTERVAL '$Days days')
 FROM ordered o
 WHERE o.id = d.id;
-"@
-    Invoke-SeedSql -Sql $sql -Quiet | Out-Null
-
-    Invoke-SeedSql -Quiet -Sql @"
 UPDATE de_schema.trace t
 SET created_at = d.created_at
 FROM de_schema.document d
 WHERE d.id = t.doc_id;
-"@ | Out-Null
-
-    $count = (Invoke-SeedSql -Sql "SELECT COUNT(*) FROM de_schema.document;") -join ""
+SELECT COUNT(*) FROM de_schema.document;
+ALTER TABLE de_schema.trace FORCE ROW LEVEL SECURITY;
+ALTER TABLE de_schema.document FORCE ROW LEVEL SECURITY;
+COMMIT;
+"@
+    $count = (Invoke-SeedSql -Sql $sql) -join ""
     Write-SeedStep "backdated $($count.Trim()) documents and their traces"
 }
 
@@ -1056,49 +1164,49 @@ function Invoke-SeedPhaseReads
 {
     param(
         [Parameter(Mandatory = $true)] $Tenants,
+        [Parameter(Mandatory = $true)] [string] $Password,
         [int] $MaxPagesPerPov = 6
     )
 
     Write-SeedPhase "Phase 8/8 - advancing read cursors"
     $index = 0
-
     foreach ($key in $Tenants.Keys)
     {
         $tenant = $Tenants[$key]
-        $povs = @($tenant.Povs | Where-Object { $_.TenantRole -ne "SENDER" })
-        if ($povs.Count -eq 0) { continue }
-
-        $pages = 0
-        foreach ($pov in $povs)
+        $index++
+        # Leave every third admin entirely untouched for the "never read" state. Tenant admins
+        # are assigned the bootstrap default POV, not every custom POV created later.
+        if ($index % 3 -eq 0)
         {
-            $index++
-            # Every third POV is left untouched so "never read" is represented.
-            if ($index % 3 -eq 0) { continue }
-            # Half the reads advance the cursor; the rest peek without consuming.
-            $advance = "true"
-            if ($index % 2 -eq 0) { $advance = "false" }
-
-            $cursor = $null
-            for ($page = 0; $page -lt $MaxPagesPerPov; $page++)
-            {
-                $route = "/documents/?pov={0}&advance_cursor={1}" -f $pov.Id, $advance
-                if ($cursor) { $route = "{0}&cursor={1}" -f $route, [Uri]::EscapeDataString($cursor) }
-
-                $result = Invoke-SeedTenantApi -Tenant $tenant -Context "document read" -Method GET `
-                    -Route $route -AllowStatus @(400, 403, 404, 422)
-                if (-not $result.Ok) { break }
-                $pages++
-
-                $payload = $result.Json
-                if ($null -eq $payload) { break }
-                $hasMore = $false
-                if ($payload.PSObject.Properties["hasMore"]) { $hasMore = [bool] $payload.hasMore }
-                if (-not $hasMore) { break }
-                if (-not $payload.PSObject.Properties["next"]) { break }
-                $cursor = $payload.next
-            }
+            Write-SeedStep ("{0,-10} left unread" -f $key)
+            continue
         }
-        Write-SeedStep ("{0,-10} read {1} pages" -f $key, $pages)
+
+        $tenant.AccessToken = Get-SeedAccessToken -Email $tenant.Email -Password $Password
+        # The high-volume tenants exercise different amounts of genuine cursor movement. Other
+        # readable tenants only peek, while the every-third set above remains completely untouched.
+        # There is no client cursor query parameter on this endpoint.
+        $advanceCursor = $key -in @("aurora", "lumen", "nordwind")
+        $advance = $advanceCursor.ToString().ToLowerInvariant()
+        $pageLimit = if ($advanceCursor)
+        {
+            [Math]::Min($MaxPagesPerPov, (@{ aurora = 1; lumen = 2; nordwind = 5 }[$key]))
+        }
+        else { 1 }
+        $pages = 0
+        for ($page = 0; $page -lt $pageLimit; $page++)
+        {
+            $result = Invoke-SeedTenantApi -Tenant $tenant -Context "document read" -Method GET `
+                -Route ("/documents/?advance_cursor={0}" -f $advance)
+            $pages++
+
+            $payload = $result.Json
+            if ($null -eq $payload) { break }
+            $hasMore = $false
+            if ($payload.PSObject.Properties["has_more"]) { $hasMore = [bool] $payload.has_more }
+            if (-not $hasMore) { break }
+        }
+        Write-SeedStep ("{0,-10} read {1} pages (advance={2})" -f $key, $pages, $advance)
     }
 }
 

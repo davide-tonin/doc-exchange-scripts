@@ -54,8 +54,8 @@ app:
             password: 'ary0yfd!bmp.wbx4EUP'
     web:
         problem-root: 'https://schemalane.com/problems'
-        public-api-base-url: 'http://localhost:5173/api'
-        password-reset-ui-base-url: 'http://localhost:5173/reset-password'
+        public-api-base-url: 'http://localhost:4200/api'
+        password-reset-ui-base-url: 'http://localhost:4200/reset-password'
     auth:
         access-token-ttl: PT15M
         refresh-token-ttl: P7D
@@ -88,7 +88,9 @@ app:
         prefix: 'documents'
         max-canonical-bytes: 10485760
         max-framed-bytes: 10485760
-        db-storage-threshold-bytes: 0
+        # Local seed payloads stay in Postgres. A zero threshold sends every tiny fixture body
+        # through real S3 and turns ~700 writes into a 25+ minute network benchmark.
+        db-storage-threshold-bytes: 10485760
         shape-cache-ttl: PT30S
         alias-cache-ttl: PT5M
     body-fetch:
@@ -124,7 +126,9 @@ app:
             reconciliation-interval: PT5M
             max-jobs-per-run: 10
     rate-limiter:
-        enabled: true
+        # The seed is a trusted loopback bulk operation. StageProperties refuses this disabled
+        # limiter unless the guarded local QA seed mode is enabled.
+        enabled: false
         pre-auth:
             enabled: true
             limits:

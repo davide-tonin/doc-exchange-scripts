@@ -80,7 +80,8 @@ function Invoke-SeedApi
         [string] $BasicCredential,
         [hashtable] $Header,
         [int[]] $AllowStatus = @(),
-        [int] $MaxAttempts = 4
+        [int] $MaxAttempts = 4,
+        [int] $TimeoutSec = 60
     )
 
     $uri = "{0}{1}" -f $script:SeedBaseUrl, $Path
@@ -99,7 +100,7 @@ function Invoke-SeedApi
             Method          = $Method
             Headers         = $headers
             UseBasicParsing = $true
-            TimeoutSec      = 60
+            TimeoutSec      = $TimeoutSec
             ErrorAction     = "Stop"
         }
         if ($null -ne $Body)
@@ -177,7 +178,17 @@ function Invoke-SeedApi
             }
 
             $script:SeedStats.Failures++
-            throw ("{0} -> {1} {2} failed with status {3}: {4}" -f $Context, $Method, $Path, $status, $bodyText)
+            $transportDetail = ""
+            if ($status -eq 0)
+            {
+                $transportDetail = $exception.Message
+                if ($exception.InnerException -and $exception.InnerException.Message)
+                {
+                    $transportDetail = "$transportDetail | $($exception.InnerException.Message)"
+                }
+            }
+            throw ("{0} -> {1} {2} failed with status {3}: {4}{5}" -f `
+                $Context, $Method, $Path, $status, $bodyText, $transportDetail)
         }
     }
 }
@@ -233,11 +244,100 @@ function Invoke-SeedTenantApi
         [Parameter(Mandatory = $true)] [string] $Route,
         $Body,
         [hashtable] $Header,
-        [int[]] $AllowStatus = @()
+        [int[]] $AllowStatus = @(),
+        [int] $MaxAttempts = 4,
+        [int] $TimeoutSec = 60
     )
     $path = "/v1/tenants/{0}{1}" -f $Tenant.CanonicalAlias, $Route
     return Invoke-SeedApi -Context ("{0} [{1}]" -f $Context, $Tenant.Key) -Method $Method -Path $path `
-        -Body $Body -Token $Tenant.AccessToken -Header $Header -AllowStatus $AllowStatus
+        -Body $Body -Token $Tenant.AccessToken -Header $Header -AllowStatus $AllowStatus `
+        -MaxAttempts $MaxAttempts -TimeoutSec $TimeoutSec
+}
+
+<#
+.SYNOPSIS
+Low-overhead document POST for bounded parallel seed workers.
+
+.DESCRIPTION
+Windows PowerShell 5.1 Invoke-WebRequest can strand responses when several runspaces share its
+legacy ServicePoint transport. Document chunks use one proxy-free HttpClient each instead. The
+same idempotency key is retained across the two bounded attempts, so an ambiguous committed
+response is safe to retry.
+#>
+function Invoke-SeedDocumentHttp
+{
+    param(
+        [Parameter(Mandatory = $true)] $Client,
+        [Parameter(Mandatory = $true)] $Tenant,
+        [Parameter(Mandatory = $true)] $Body,
+        [Parameter(Mandatory = $true)] [string] $IdempotencyKey,
+        [int] $TimeoutSec = 15,
+        [int] $MaxAttempts = 2
+    )
+
+    $uri = "{0}/v1/tenants/{1}/documents/" -f $script:SeedBaseUrl, $Tenant.CanonicalAlias
+    $jsonBytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-SeedJson $Body))
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++)
+    {
+        $request = New-Object System.Net.Http.HttpRequestMessage(
+            [System.Net.Http.HttpMethod]::Post, $uri)
+        $content = New-Object System.Net.Http.ByteArrayContent -ArgumentList (, $jsonBytes)
+        $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse(
+            "application/json; charset=utf-8")
+        $request.Content = $content
+        [void] $request.Headers.TryAddWithoutValidation("Accept", "application/json")
+        [void] $request.Headers.TryAddWithoutValidation("Authorization", "Bearer $($Tenant.AccessToken)")
+        [void] $request.Headers.TryAddWithoutValidation("Idempotency-Key", $IdempotencyKey)
+        $cancellation = New-Object System.Threading.CancellationTokenSource
+        $cancellation.CancelAfter([TimeSpan]::FromSeconds($TimeoutSec))
+        try
+        {
+            $script:SeedStats.Requests++
+            $response = $Client.SendAsync($request, $cancellation.Token).GetAwaiter().GetResult()
+            try
+            {
+                $status = [int] $response.StatusCode
+                $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                if ($response.IsSuccessStatusCode)
+                {
+                    return [pscustomobject]@{ Ok = $true; Status = $status }
+                }
+                if ($status -in @(400, 403, 409, 422))
+                {
+                    return [pscustomobject]@{ Ok = $false; Status = $status }
+                }
+                if (($status -eq 429 -or $status -ge 500) -and $attempt -lt $MaxAttempts)
+                {
+                    $script:SeedStats.Retries++
+                    if ($status -eq 429) { $script:SeedStats.RateLimited++ }
+                    Start-Sleep -Seconds $attempt
+                    continue
+                }
+                $script:SeedStats.Failures++
+                throw "document send [$($Tenant.Key)] failed with status ${status}: $text"
+            }
+            finally
+            {
+                if ($null -ne $response) { $response.Dispose() }
+            }
+        }
+        catch
+        {
+            if ($attempt -lt $MaxAttempts)
+            {
+                $script:SeedStats.Retries++
+                Start-Sleep -Seconds $attempt
+                continue
+            }
+            $script:SeedStats.Failures++
+            throw "document send [$($Tenant.Key)] transport failure: $($_.Exception.Message)"
+        }
+        finally
+        {
+            $cancellation.Dispose()
+            $request.Dispose()
+        }
+    }
 }
 
 <#
@@ -249,16 +349,66 @@ Used only for the two things the API cannot express: promoting verifiable aliase
 fn_alias_transition, and backdating document/trace timestamps. Refuses to run against
 anything but the local compose container.
 #>
+function Initialize-SeedSql
+{
+    param(
+        [Parameter(Mandatory = $true)] [string] $DatabaseRepository,
+        [string] $Container = "doc-exchange-postgres"
+    )
+
+    $configPath = Join-Path (Resolve-Path -LiteralPath $DatabaseRepository).Path "flyway.conf"
+    if (-not (Test-Path -LiteralPath $configPath))
+    {
+        throw "Flyway configuration not found: $configPath"
+    }
+
+    $properties = @{}
+    Get-Content -LiteralPath $configPath | ForEach-Object {
+        if ($_ -match '^\s*([^#][^=]*)=(.*)$')
+        {
+            $properties[$matches[1].Trim()] = $matches[2].Trim()
+        }
+    }
+
+    $jdbcUrl = $properties['flyway.url']
+    if ($jdbcUrl -notmatch '^jdbc:postgresql://(?<host>localhost|127\.0\.0\.1):(?<port>\d+)/(?<database>[A-Za-z0-9_-]+)$')
+    {
+        throw "Refusing seed SQL against non-loopback or unsupported Flyway URL: $jdbcUrl"
+    }
+    if ([string]::IsNullOrWhiteSpace($properties['flyway.user']) -or
+        [string]::IsNullOrWhiteSpace($properties['flyway.password']))
+    {
+        throw "flyway.user and flyway.password are required in $configPath for seed SQL."
+    }
+
+    # The container is only a disposable psql client. Connecting through host.docker.internal
+    # guarantees that direct seed SQL reaches the same localhost TCP endpoint as Flyway and the
+    # application, even when a native PostgreSQL service and Docker are both present.
+    $script:SeedSqlConnection = [PSCustomObject]@{
+        Container = $Container
+        Host = 'host.docker.internal'
+        Port = [int] $matches['port']
+        Database = $matches['database']
+        User = $properties['flyway.user']
+        Password = $properties['flyway.password']
+    }
+}
+
 function Invoke-SeedSql
 {
     param(
         [Parameter(Mandatory = $true)] [string] $Sql,
-        [string] $Container = "doc-exchange-postgres",
         [switch] $Quiet
     )
+    if ($null -eq $script:SeedSqlConnection)
+    {
+        throw "Seed SQL is not initialized. Call Initialize-SeedSql first."
+    }
+    $connection = $script:SeedSqlConnection
     $arguments = @(
-        "exec", "-e", "PGPASSWORD=postgres", $Container,
-        "psql", "-U", "postgres", "-d", "de-db",
+        "exec", "-e", ("PGPASSWORD={0}" -f $connection.Password), $connection.Container,
+        "psql", "-h", $connection.Host, "-p", $connection.Port,
+        "-U", $connection.User, "-d", $connection.Database,
         "-v", "ON_ERROR_STOP=1", "-X", "-q", "-t", "-A",
         "-c", $Sql
     )
@@ -273,10 +423,9 @@ function Invoke-SeedSql
 
 function Test-SeedDatabaseReachable
 {
-    param([string] $Container = "doc-exchange-postgres")
     try
     {
-        Invoke-SeedSql -Sql "SELECT 1;" -Container $Container -Quiet | Out-Null
+        Invoke-SeedSql -Sql "SELECT 1 FROM de_schema.flyway_schema_history LIMIT 1;" -Quiet | Out-Null
         return $true
     }
     catch

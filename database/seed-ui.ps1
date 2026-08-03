@@ -38,7 +38,7 @@ param(
     [string] $ServiceRepository = "C:\Users\DavideTonin\IdeaProjects\doc-exchange-service",
     [string] $DatabaseRepository = "C:\Users\DavideTonin\DataGripProjects\doc-exchange-db",
     [string] $BaseUrl = "http://localhost:8080/api",
-    [string] $BrowserOrigin = "http://localhost:5173",
+    [string] $BrowserOrigin = "http://localhost:4200",
     [string] $LoginPassword = "UiPlayground!2026",
     [ValidateSet("Full", "Fast")] [string] $Scale = "Full",
     [int] $Seed = 20260802,
@@ -71,6 +71,7 @@ if ([string]::IsNullOrWhiteSpace($ManifestPath))
 }
 
 Initialize-SeedHttp -BaseUrl $BaseUrl -BrowserOrigin $BrowserOrigin
+Initialize-SeedSql -DatabaseRepository $DatabaseRepository -Container $PostgresContainer
 
 # --- Phase 0: reset and health ------------------------------------------------------------------
 
@@ -121,10 +122,10 @@ while (-not $healthy -and [DateTimeOffset]::UtcNow -lt $deadline)
 if (-not $healthy) { throw "QA did not become healthy within $HealthTimeoutSeconds seconds." }
 Write-SeedStep "QA is UP with database health UP"
 
-if (-not (Test-SeedDatabaseReachable -Container $PostgresContainer))
+if (-not (Test-SeedDatabaseReachable))
 {
-    throw ("Cannot reach the local Postgres container '$PostgresContainer' through docker exec. " +
-        "The alias-promotion and backdating passes need it.")
+    throw ("Cannot reach the migrated local QA database through the '$PostgresContainer' psql client. " +
+        "The alias-promotion and backdating passes need the same database used by the application.")
 }
 
 # --- Phases 1-8 ---------------------------------------------------------------------------------
@@ -137,9 +138,9 @@ Invoke-SeedPhaseLogin -Tenants $tenants -Password $LoginPassword
 Invoke-SeedPhaseTenantGraph -Tenants $tenants -Dataset $dataset -Password $LoginPassword -Seed $Seed
 Invoke-SeedPhaseAliasPromotion -Tenants $tenants
 $shareRecords = Invoke-SeedPhaseCrossTenant -Tenants $tenants -Dataset $dataset -Seed $Seed
-$documentsSent = Invoke-SeedPhaseDocuments -Tenants $tenants -Dataset $dataset -Seed $Seed
+$documentsSent = Invoke-SeedPhaseDocuments -Tenants $tenants -Dataset $dataset -Seed $Seed -Password $LoginPassword
 Invoke-SeedPhaseBackdate -Days $BackdateDays
-Invoke-SeedPhaseReads -Tenants $tenants
+Invoke-SeedPhaseReads -Tenants $tenants -Password $LoginPassword
 
 # --- Manifest and Postman handoff ----------------------------------------------------------------
 
