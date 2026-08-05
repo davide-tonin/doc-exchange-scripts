@@ -13,6 +13,11 @@ Set-StrictMode -Version 2.0
 . "$PSScriptRoot\Seed-Common.ps1"
 . "$PSScriptRoot\Seed-Dataset.ps1"
 
+# API-key lifetime in seconds. The API accepts 1 hour (3600) through 180 days (15552000)
+# inclusive; 90 days is the documented example and keeps every seeded key valid well past
+# the life of a seeded dataset.
+$script:SeedApiKeyLifetimeSeconds = 7776000
+
 function New-SeedRandom
 {
     param([int] $Seed)
@@ -394,11 +399,17 @@ function Add-SeedIdentities
         $status = "ENABLED"
         if ($i % 23 -eq 7) { $status = "DISABLED" }
 
+        # Credentials are provisioned inline at create time (the API writes the identity and its
+        # mandatory credentials as final version 2 in one transaction). A flat top-level
+        # auth_type is no longer part of the contract; it must be a nested credentials object.
+        # Creation is always ENABLED: mandatory credential provisioning refuses any other status
+        # (IDENTITY_CREATE_REQUIRES_ENABLED_STATUS). Disabled fixtures are produced by patching
+        # the identity down after it exists, which is also how a real operator would do it.
         $body = @{
             email        = ("{0}@{1}" -f $name.Local, $Tenant.Domain)
-            auth_type    = "USERNAME_PASSWORD"
+            credentials  = @{ auth_type = "USERNAME_PASSWORD" }
             display_name = $name.Display
-            status       = $status
+            status       = "ENABLED"
             type         = "HUMAN"
         }
         # A handful expire soon so the expiry badge and the 24h warning have data.
@@ -409,9 +420,26 @@ function Add-SeedIdentities
             -Route "/identities/" -Body $body -AllowStatus @(409, 422)
         if (-not $result.Ok) { [void] $Tenant.CapHits.Add("identity=$($result.Status)"); return }
 
+        # Create returns { item, credentials } — the identity itself is under `item`.
+        $identityId = $result.Json.item.id
+        $etag = $result.ETag
+
+        if ($status -eq "DISABLED")
+        {
+            # PATCH replaces the mutable fields, so carry expires_at through or it is cleared.
+            $patch = @{ display_name = $name.Display; status = "DISABLED" }
+            if ($body.ContainsKey("expires_at")) { $patch["expires_at"] = $body["expires_at"] }
+
+            $patched = Invoke-SeedTenantApi -Tenant $Tenant -Context "identity disable" -Method PATCH `
+                -Route ("/identities/{0}" -f $identityId) -Body $patch `
+                -Header @{ "If-Match" = $etag } -AllowStatus @(409, 412, 422)
+            if ($patched.Ok) { $etag = $patched.ETag }
+            else { $status = "ENABLED" }
+        }
+
         [void] $Tenant.Identities.Add([pscustomobject]@{
-            Id = $result.Json.id; DisplayName = $name.Display; Email = $body.email
-            Type = "HUMAN"; Status = $status; ETag = $result.ETag
+            Id = $identityId; DisplayName = $name.Display; Email = $body.email
+            Type = "HUMAN"; Status = $status; ETag = $etag
         })
     }
 
@@ -422,7 +450,7 @@ function Add-SeedIdentities
         if ($i -ge $Dataset.ServiceNames.Count) { $name = "{0} {1}" -f $base, ([Math]::Floor($i / $Dataset.ServiceNames.Count) + 1) }
 
         $body = @{
-            auth_type    = "API_KEY"
+            credentials  = @{ auth_type = "API_KEY"; expires_in = $script:SeedApiKeyLifetimeSeconds }
             display_name = $name
             status       = "ENABLED"
             type         = "SERVICE"
@@ -432,7 +460,7 @@ function Add-SeedIdentities
         if (-not $result.Ok) { [void] $Tenant.CapHits.Add("identity=$($result.Status)"); return }
 
         [void] $Tenant.Identities.Add([pscustomobject]@{
-            Id = $result.Json.id; DisplayName = $name; Email = $null
+            Id = $result.Json.item.id; DisplayName = $name; Email = $null
             Type = "SERVICE"; Status = "ENABLED"; ETag = $result.ETag
         })
     }
@@ -472,7 +500,8 @@ function Add-SeedCredentials
     for ($i = 0; $i -lt $rotations; $i++)
     {
         Invoke-SeedTenantApi -Tenant $Tenant -Context "rotateApiKey" -Method POST `
-            -Route ("/identities/{0}:rotateApiKey" -f $services[$i].Id) -AllowStatus @(409, 422) | Out-Null
+            -Route ("/identities/{0}:rotateApiKey" -f $services[$i].Id) `
+            -Body @{ expires_in = $script:SeedApiKeyLifetimeSeconds } -AllowStatus @(409, 422) | Out-Null
     }
 }
 
@@ -481,8 +510,17 @@ function Add-SeedLocalGrants
     param($Tenant, $Random)
 
     # Disabled roles remain in the dataset for lifecycle/empty-state UI, but the real grant
-    # validator deliberately does not resolve them as assignable permissions.
+    # validator deliberately does not resolve them as assignable permissions. Every tenant has
+    # the bootstrap-created Docs Contributor role, so use it as a fallback for sparse/Fast
+    # tenants with no custom enabled roles. This keeps the identity-role list dense without
+    # inflating the configured role totals.
     $roles = @($Tenant.Roles | Where-Object { $_.Status -eq "ENABLED" })
+    if ($roles.Count -eq 0)
+    {
+        $roles = @([pscustomobject]@{
+            Id = $Tenant.DocsRoleId; Name = "Docs Contributor"; Status = "ENABLED"
+        })
+    }
     $povs = @($Tenant.Povs)
     if ($roles.Count -eq 0 -and $povs.Count -eq 0) { return }
 

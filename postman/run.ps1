@@ -71,6 +71,7 @@ function Initialize-RunState {
     )) {
         Set-EnvironmentValue $key ""
     }
+    Set-EnvironmentValue "service_api_key" "" "secret"
 }
 
 function Select-PrimaryPlaygroundTenant {
