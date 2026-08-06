@@ -365,7 +365,7 @@ function Get-SeedDataset
     }
 
     # Owner shares an identity into a grantee tenant; the grantee then grants its own role and
-    # POV back to it. Covers both status sides, share-without-grant, SERVICE identity sharing,
+    # POV back to it. Covers both status sides, share-without-grant, SERVICE_ACCOUNT identity sharing,
     # and GOVERNMENT<->COMPANY in both directions.
     $shares = @(
         @{ Owner = "aurora";   Grantee = "lumen";   Subject = "admin";   Grant = $true;  OwnerStatus = "ENABLED";  GranteeStatus = "ENABLED" },

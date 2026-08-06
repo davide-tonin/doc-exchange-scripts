@@ -410,13 +410,13 @@ function Add-SeedIdentities
             credentials  = @{ auth_type = "USERNAME_PASSWORD" }
             display_name = $name.Display
             status       = "ENABLED"
-            type         = "HUMAN"
+            type         = "PERSON"
         }
         # A handful expire soon so the expiry badge and the 24h warning have data.
         if ($i % 29 -eq 3) { $body["expires_at"] = (Get-SeedIsoNow -AddDays 45) }
         elseif ($i -eq 2) { $body["expires_at"] = (Get-SeedIsoNow -AddDays 1) }
 
-        $result = Invoke-SeedTenantApi -Tenant $Tenant -Context "identity HUMAN" -Method POST `
+        $result = Invoke-SeedTenantApi -Tenant $Tenant -Context "identity PERSON" -Method POST `
             -Route "/identities/" -Body $body -AllowStatus @(409, 422)
         if (-not $result.Ok) { [void] $Tenant.CapHits.Add("identity=$($result.Status)"); return }
 
@@ -439,7 +439,7 @@ function Add-SeedIdentities
 
         [void] $Tenant.Identities.Add([pscustomobject]@{
             Id = $identityId; DisplayName = $name.Display; Email = $body.email
-            Type = "HUMAN"; Status = $status; ETag = $etag
+            Type = "PERSON"; Status = $status; ETag = $etag
         })
     }
 
@@ -453,15 +453,15 @@ function Add-SeedIdentities
             credentials  = @{ auth_type = "API_KEY"; expires_in = $script:SeedApiKeyLifetimeSeconds }
             display_name = $name
             status       = "ENABLED"
-            type         = "SERVICE"
+            type         = "SERVICE_ACCOUNT"
         }
-        $result = Invoke-SeedTenantApi -Tenant $Tenant -Context "identity SERVICE" -Method POST `
+        $result = Invoke-SeedTenantApi -Tenant $Tenant -Context "identity SERVICE_ACCOUNT" -Method POST `
             -Route "/identities/" -Body $body -AllowStatus @(409, 422)
         if (-not $result.Ok) { [void] $Tenant.CapHits.Add("identity=$($result.Status)"); return }
 
         [void] $Tenant.Identities.Add([pscustomobject]@{
             Id = $result.Json.item.id; DisplayName = $name; Email = $null
-            Type = "SERVICE"; Status = "ENABLED"; ETag = $result.ETag
+            Type = "SERVICE_ACCOUNT"; Status = "ENABLED"; ETag = $result.ETag
         })
     }
 }
@@ -479,7 +479,7 @@ function Add-SeedCredentials
     param($Tenant, [string] $Password)
 
     $definition = $Tenant.Definition
-    $humans = @($Tenant.Identities | Where-Object { $_.Type -eq "HUMAN" -and $_.Status -eq "ENABLED" })
+    $humans = @($Tenant.Identities | Where-Object { $_.Type -eq "PERSON" -and $_.Status -eq "ENABLED" })
     $wanted = [Math]::Min($definition.Credentialed, $humans.Count)
 
     for ($i = 0; $i -lt $wanted; $i++)
@@ -495,7 +495,7 @@ function Add-SeedCredentials
         })
     }
 
-    $services = @($Tenant.Identities | Where-Object { $_.Type -eq "SERVICE" })
+    $services = @($Tenant.Identities | Where-Object { $_.Type -eq "SERVICE_ACCOUNT" })
     $rotations = [Math]::Min(2, $services.Count)
     for ($i = 0; $i -lt $rotations; $i++)
     {
@@ -524,16 +524,46 @@ function Add-SeedLocalGrants
     $povs = @($Tenant.Povs)
     if ($roles.Count -eq 0 -and $povs.Count -eq 0) { return }
 
-    $index = 0
-    foreach ($identity in $Tenant.Identities)
+    # The bootstrap admin already has its Admin role and is not present in Tenant.Identities.
+    # Keep at most 20% of the tenant's total identities role-less; integer rounding therefore
+    # favours assigning a role. Shuffle deterministically so role-less fixtures are not always
+    # the service accounts, which are appended after people during identity creation.
+    $identities = @($Tenant.Identities)
+    for ($i = $identities.Count - 1; $i -gt 0; $i--)
     {
-        if ($roles.Count -gt 0)
+        $swapIndex = $Random.Next(0, $i + 1)
+        $temporary = $identities[$i]
+        $identities[$i] = $identities[$swapIndex]
+        $identities[$swapIndex] = $temporary
+    }
+    # The public assignment resolver deliberately rejects disabled identities. Put disabled
+    # fixtures into the role-less slice first, then fill any remaining 20% from shuffled live
+    # identities. POV grants still run for every identity below.
+    $enabledIdentities = @($identities | Where-Object { $_.Status -eq "ENABLED" })
+    $disabledIdentities = @($identities | Where-Object { $_.Status -ne "ENABLED" })
+    $identities = @($enabledIdentities) + @($disabledIdentities)
+    $totalIdentityCount = $identities.Count + 1
+    $withoutRoleCount = [int] [Math]::Floor($totalIdentityCount * 0.20)
+    $localRoleGrantCount = [Math]::Max(0, $identities.Count - $withoutRoleCount)
+    if ($localRoleGrantCount -gt $enabledIdentities.Count)
+    {
+        throw "Tenant $($Tenant.Key) does not have enough enabled identities for the 80% role target."
+    }
+
+    $index = 0
+    foreach ($identity in $identities)
+    {
+        if ($roles.Count -gt 0 -and $index -lt $localRoleGrantCount)
         {
             $role = $roles[$index % $roles.Count]
-            Invoke-SeedTenantApi -Tenant $Tenant -Context "identity role" -Method PUT `
+            $roleGrant = Invoke-SeedTenantApi -Tenant $Tenant -Context "identity role" -Method PUT `
                 -Route ("/identities/{0}/role" -f $identity.Id) `
                 -Body @{ role_id = $role.Id } `
-                -Header @{ "If-None-Match" = "*" } -AllowStatus @(409, 412, 422, 428) | Out-Null
+                -Header @{ "If-None-Match" = "*" }
+            if (-not $roleGrant.Ok)
+            {
+                throw "Identity role grant unexpectedly failed for tenant $($Tenant.Key), identity $($identity.Id)."
+            }
         }
 
         if ($povs.Count -gt 0)
@@ -748,12 +778,12 @@ function Invoke-SeedPhaseCrossTenant
         $subjectName = "admin"
         if ($share.Subject -eq "human")
         {
-            $candidate = @($owner.Identities | Where-Object { $_.Type -eq "HUMAN" -and $_.Status -eq "ENABLED" })
+            $candidate = @($owner.Identities | Where-Object { $_.Type -eq "PERSON" -and $_.Status -eq "ENABLED" })
             if ($candidate.Count -gt 0) { $subjectId = $candidate[0].Id; $subjectName = $candidate[0].DisplayName }
         }
         elseif ($share.Subject -eq "service")
         {
-            $candidate = @($owner.Identities | Where-Object { $_.Type -eq "SERVICE" })
+            $candidate = @($owner.Identities | Where-Object { $_.Type -eq "SERVICE_ACCOUNT" })
             if ($candidate.Count -gt 0) { $subjectId = $candidate[0].Id; $subjectName = $candidate[0].DisplayName }
         }
 

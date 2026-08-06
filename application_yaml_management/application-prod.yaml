@@ -4,6 +4,9 @@ spring:
     jackson:
         deserialization:
             fail-on-numbers-for-enums: true
+        mapper:
+            accept-case-insensitive-enums: true
+            accept-case-insensitive-values: true
     sql:
         init:
             mode: never
@@ -55,6 +58,34 @@ app:
         problem-root: 'https://schemalane.com/problems'
         public-api-base-url: 'http://localhost:5173/api'
         password-reset-ui-base-url: 'http://localhost:5173/reset-password'
+    oauth2:
+        enabled: true
+        google:
+            enabled: true
+            client-id: "REPLACE_WITH_GOOGLE_CLIENT_ID"
+            client-secret: "REPLACE_WITH_GOOGLE_CLIENT_SECRET"
+            authorization-uri: "https://accounts.google.com/o/oauth2/v2/auth"
+            token-uri: "https://oauth2.googleapis.com/token"
+            jwk-set-uri: "https://www.googleapis.com/oauth2/v3/certs"
+            callback-uri: "https://app.schemalane.com/api/internal/auth/oauth2/google/callback"
+            issuer: "https://accounts.google.com"
+        microsoft:
+            enabled: true
+            client-id: "REPLACE_WITH_MICROSOFT_CLIENT_ID"
+            client-secret: "REPLACE_WITH_MICROSOFT_CLIENT_SECRET"
+            authorization-uri: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+            token-uri: "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+            jwk-set-uri: "https://login.microsoftonline.com/common/discovery/v2.0/keys"
+            callback-uri: "https://app.schemalane.com/api/internal/auth/oauth2/microsoft/callback"
+            issuer: "https://login.microsoftonline.com/{tenantid}/v2.0"
+        browser-complete-uri: "https://app.schemalane.com/oauth2/callback"
+        transaction-ttl: PT5M
+        service-access-token-ttl: PT15M
+        client-secret-min-ttl: PT1H
+        client-secret-max-ttl: P180D
+        clock-skew: PT30S
+        connect-timeout: PT3S
+        read-timeout: PT5S
     auth:
         access-token-ttl: PT15M
         refresh-token-ttl: P7D

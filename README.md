@@ -19,6 +19,26 @@ tests validate those files; all commands which operate them are here.
 .\application\openapi-smoke.ps1
 ```
 
+## Stage configuration
+
+```powershell
+.\application_yaml_management\upload.ps1 -Stage qa
+```
+
+`application-qa.yaml`, `application-sandbox.yaml` and `application-prod.yaml` are the real
+deployed stage documents; `upload.ps1` pushes one of them to
+`s3://de-stage-configuration-7f3c91a6e4b82d50/stages/<stage>/application.yaml`.
+
+The service reads exactly one complete literal document — no placeholders, imports, profile
+overlays, anchors or defaults — and validates its raw structure before any bean is created.
+An unknown key does not degrade gracefully, it aborts startup, and the failure only surfaces
+on the next restart of that stage. **Add the key to `ALLOWED_FRAMEWORK_LEAF_PATHS` in the
+service's `StageConfigurationPreflight` and deploy that build first, then upload.**
+
+All three documents currently enable case-insensitive enum intake
+(`spring.jackson.mapper.accept-case-insensitive-enums` and `-values`), so callers may send
+`PERSON`, `person` or `Person`. Responses still emit the exact `UPPER_SNAKE_CASE` name.
+
 ## Database and UI fixtures
 
 ```powershell
@@ -46,10 +66,17 @@ repo at `docs\UI_SEED_DATASET.md`.
 ## Postman E2E and UI development
 
 ```powershell
+.\postman\refresh.ps1 -UseTestExport
 .\postman\e2e-local.ps1
 .\postman\seed-playground.ps1
 .\postman\show-e2e-flow.ps1
 ```
+
+`refresh.ps1` regenerates the collections from the service's own OpenAPI documents — with
+`-UseTestExport` it runs `PostmanOpenApiExportIT` to produce them, otherwise it fetches them
+from a running instance. Run it after any request-contract change: the generated collections
+carry literal request bodies, so a renamed enum constant or schema leaves them sending values
+the API now rejects, and the e2e run fails on the stale body rather than on a real defect.
 
 The Postman Desktop import files are in the service repository:
 
