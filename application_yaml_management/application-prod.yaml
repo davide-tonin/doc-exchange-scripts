@@ -162,11 +162,19 @@ app:
         post-auth:
             enabled: true
             credential:
-                CORE: { limits: [{ capacity: 300, window: PT10S }, { capacity: 3000, window: PT1M }] }
-                ADMIN: { limits: [{ capacity: 30, window: PT10S }, { capacity: 300, window: PT1M }] }
+                CORE: { limits: [ { capacity: 300, window: PT10S }, { capacity: 3000, window: PT1M } ] }
+                ADMIN: { limits: [ { capacity: 30, window: PT10S }, { capacity: 300, window: PT1M } ] }
+                OAUTH2_START: { limits: [ { capacity: 20, window: PT10S }, { capacity: 120, window: PT1M } ] }
+                OAUTH2_CALLBACK: { limits: [ { capacity: 20, window: PT10S }, { capacity: 120, window: PT1M } ] }
+                OAUTH2_COMPLETE: { limits: [ { capacity: 20, window: PT10S }, { capacity: 120, window: PT1M } ] }
+                OAUTH2_TOKEN: { limits: [ { capacity: 30, window: PT10S }, { capacity: 300, window: PT1M } ] }
             tenant:
-                CORE: { limits: [{ capacity: 1000, window: PT10S }, { capacity: 10000, window: PT1M }] }
-                ADMIN: { limits: [{ capacity: 100, window: PT10S }, { capacity: 1000, window: PT1M }] }
+                CORE: { limits: [ { capacity: 1000, window: PT10S }, { capacity: 10000, window: PT1M } ] }
+                ADMIN: { limits: [ { capacity: 100, window: PT10S }, { capacity: 1000, window: PT1M } ] }
+                OAUTH2_START: { limits: [ { capacity: 100, window: PT10S }, { capacity: 1000, window: PT1M } ] }
+                OAUTH2_CALLBACK: { limits: [ { capacity: 100, window: PT10S }, { capacity: 1000, window: PT1M } ] }
+                OAUTH2_COMPLETE: { limits: [ { capacity: 100, window: PT10S }, { capacity: 1000, window: PT1M } ] }
+                OAUTH2_TOKEN: { limits: [ { capacity: 100, window: PT10S }, { capacity: 1000, window: PT1M } ] }
         cache:
             maximum-size: 100000
             expire-after-access: PT10M
