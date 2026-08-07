@@ -27,7 +27,7 @@ revision produces the same graph.
 .PARAMETER SkipReset
 Seeds on top of whatever is already there. Only useful when a previous run died mid-way; the
 seeder does not reconcile existing rows, so a clean reset is the supported path. The existing
-database must already expose the OAuth2 schema contract at migration V052 or the seed aborts.
+database must already expose the OAuth2 schema contract at migration V053 or the seed aborts.
 
 .EXAMPLE
 .\seed-ui.ps1
@@ -157,13 +157,13 @@ SELECT CONCAT_WS('|',
 );
 "@ | Out-String).Trim()
 
-if ($oauth2SchemaState -ne '052|t|t|t')
+if ($oauth2SchemaState -ne '053|t|t|t')
 {
     throw ("The local QA database is stale (schema contract '$oauth2SchemaState'; expected " +
-        "'052|t|t|t'). Run seed-ui.ps1 without -SkipReset so Flyway clean/migrate rebuilds " +
+        "'053|t|t|t'). Run seed-ui.ps1 without -SkipReset so Flyway clean/migrate rebuilds " +
         "the database from the OAuth2 schema before the service or UI reads identities.")
 }
-Write-SeedStep "OAuth2 database schema contract V052 is present"
+Write-SeedStep "OAuth2 database schema contract V053 is present"
 
 # --- Phases 1-8 ---------------------------------------------------------------------------------
 
