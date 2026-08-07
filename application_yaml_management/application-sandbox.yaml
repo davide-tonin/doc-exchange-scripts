@@ -90,6 +90,13 @@ app:
         clock-skew: PT30S
         connect-timeout: PT3S
         read-timeout: PT5S
+        jwks-cache-ttl: PT5M
+        jwks-refresh-min-interval: PT30S
+        jwks-max-response-bytes: 65536
+        token-response-max-bytes: 65536
+        authorization-code-max-length: 4096
+        id-token-max-length: 32768
+        client-credentials-max-length: 8192
     secrets:
         refresh-enabled: true
         refresh-interval: PT30S
